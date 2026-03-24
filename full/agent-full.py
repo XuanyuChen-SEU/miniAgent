@@ -14,6 +14,11 @@ agent-full.py - 七篇合一的完整 Agent
   python full/agent-full.py "你的任务"
   python full/agent-full.py --auto "你的任务"      # 跳过用户确认
   python full/agent-full.py --team "你的任务"       # 使用多智能体团队模式
+
+代码结构建议：
+  1) 入口与 run_single/run_team_mode（主编排）
+  2) run_agent 与 execute_with_hooks（核心执行链路）
+  3) 记忆 / 压缩 / SubAgent / Teams / Rules/Skills/MCP（能力模块）
 """
 
 import os
@@ -26,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from openai import OpenAI
 
+# SDK 客户端初始化。通过环境变量切换平台、网关、模型。
 client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY"),
     base_url=os.environ.get("OPENAI_BASE_URL")
@@ -53,6 +59,7 @@ DANGEROUS_PATTERNS = [
 ]
 
 def is_dangerous(command):
+    """命令危险性检测：命中任意正则即判定危险。"""
     for pattern in DANGEROUS_PATTERNS:
         if re.search(pattern, command):
             return True, pattern
@@ -61,6 +68,7 @@ def is_dangerous(command):
 # --- 防线 2: 用户确认 ---
 
 def ask_user_confirmation(tool_name, args):
+    """执行前人工确认。返回 True=继续，False=跳过。"""
     if AUTO_APPROVE:
         return True
     print(f"\n┌─ 确认执行 ─────────────────────────────")
@@ -82,6 +90,7 @@ def ask_user_confirmation(tool_name, args):
 MAX_OUTPUT_LENGTH = 5000
 
 def truncate_output(text):
+    """长输出裁剪：保留头尾，避免上下文爆炸。"""
     if len(text) <= MAX_OUTPUT_LENGTH:
         return text
     half = MAX_OUTPUT_LENGTH // 2
@@ -122,6 +131,7 @@ def execute_with_hooks(tool_name, args, func):
 # ======================== 第一篇 + 第三篇: 工具 ========================
 
 def read(path, offset=None, limit=None):
+    """读取文件并带行号，便于模型后续精准 edit。"""
     try:
         with open(path, 'r') as f:
             lines = f.readlines()
@@ -141,6 +151,7 @@ def write(path, content):
         return f"Error: {str(e)}"
 
 def edit(path, old_string, new_string):
+    """精确替换：要求 old_string 在文件中只出现一次。"""
     try:
         with open(path, 'r') as f:
             content = f.read()
@@ -227,6 +238,7 @@ SKILLS_DIR = ".agent/skills"
 MCP_CONFIG = ".agent/mcp.json"
 
 def load_rules():
+    """加载 .agent/rules 下所有 Markdown 规则并拼接。"""
     if not os.path.exists(RULES_DIR):
         return ""
     try:
@@ -239,6 +251,7 @@ def load_rules():
         return ""
 
 def load_skills():
+    """加载技能 JSON（这里主要用于给 system prompt 展示索引信息）。"""
     if not os.path.exists(SKILLS_DIR):
         return []
     try:
@@ -251,6 +264,7 @@ def load_skills():
         return []
 
 def load_mcp_tools():
+    """从 mcp.json 读取工具声明，转换为 OpenAI tools 结构。"""
     if not os.path.exists(MCP_CONFIG):
         return []
     try:
@@ -271,6 +285,7 @@ def load_mcp_tools():
 MEMORY_FILE = "agent_memory.md"
 
 def load_memory():
+    """读取最近记忆，避免无限制注入历史造成噪音。"""
     if not os.path.exists(MEMORY_FILE):
         return ""
     try:
@@ -281,6 +296,7 @@ def load_memory():
         return ""
 
 def save_memory(task, result):
+    """把任务结果摘要追加到记忆文件，形成可复用经验。"""
     try:
         with open(MEMORY_FILE, 'a') as f:
             f.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n**Task:** {task}\n**Result:** {result[:500]}\n")
@@ -293,6 +309,7 @@ COMPACT_THRESHOLD = 20
 KEEP_RECENT = 6
 
 def compact_messages(messages):
+    """超过阈值时压缩旧上下文，仅保留最近消息 + 摘要。"""
     if len(messages) <= COMPACT_THRESHOLD:
         return messages
     print(f"\n[Compact] {len(messages)} 条消息 → 压缩中...")
@@ -382,6 +399,7 @@ class Team:
 # ======================== Agent 核心循环 ========================
 
 def run_agent(messages, all_tools, max_iterations=30):
+    """主循环：模型输出 -> 执行工具 -> 回填结果 -> 继续下一轮。"""
     for _ in range(max_iterations):
         messages = compact_messages(messages)
         response = client.chat.completions.create(model=MODEL, messages=messages, tools=all_tools)
@@ -436,6 +454,7 @@ def run_single(task):
 
 def run_team_mode(task):
     """多智能体团队模式（第五篇的能力）"""
+    # 先由“PM 提示词”生成团队编制，再按顺序协作并广播阶段成果。
     team = Team()
     print(f"\n[PM] 分析任务，组建团队...")
     resp = client.chat.completions.create(

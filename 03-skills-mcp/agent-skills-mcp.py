@@ -4,6 +4,11 @@
 重点：
 - 这里先做“可运行的最小版”，把外部能力接入点留清楚。
 - 重要设计写在注释里，你可以按注释逐步补全真实 MCP 对接。
+
+说明：
+- Rules：约束执行边界与行为规范
+- Skills：定义可复用任务能力索引
+- MCP：接入外部系统工具能力
 """
 
 import json
@@ -15,9 +20,11 @@ from pathlib import Path
 from openai import OpenAI
 
 
+# 与前两个阶段一致：基础客户端初始化。
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), base_url=os.environ.get("OPENAI_BASE_URL"))
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
+# 约定目录（你也可以换成自己项目里的路径）
 RULES_DIR = ".agent/rules"
 SKILLS_DIR = ".agent/skills"
 MCP_FILE = ".agent/mcp.json"
@@ -50,6 +57,7 @@ def load_rules_text() -> str:
     if not Path(RULES_DIR).exists():
         return ""
     parts = []
+    # 把每个规则文件合并成一个大文本块。
     for p in Path(RULES_DIR).glob("*.md"):
         parts.append(f"# {p.name}\n{p.read_text(encoding='utf-8')}")
     return "\n\n".join(parts)
@@ -59,6 +67,7 @@ def load_skill_index_text() -> str:
     # 这里先只加载技能清单（元信息）；真正执行技能可在后续加 dispatcher
     if not Path(SKILLS_DIR).exists():
         return ""
+    # 这里只给模型一个“可用技能目录”，还没做技能文件内容注入，p.stem返回文件名。
     names = [p.stem for p in Path(SKILLS_DIR).glob("*.json")]
     return "\n".join(f"- {name}" for name in names)
 
@@ -72,6 +81,7 @@ def load_mcp_tools() -> list[dict]:
     except json.JSONDecodeError:
         return []
     tools = []
+    # 把多个 MCP server 的工具声明统一平铺成 tools 列表。
     for _, server in data.get("mcpServers", {}).items():
         for tool in server.get("tools", []):
             tools.append({"type": "function", "function": tool})
@@ -83,6 +93,7 @@ def run(task: str) -> str:
     skills_text = load_skill_index_text()
     mcp_tools = load_mcp_tools()
 
+    # 注意：这里只是“声明可调用”，还没有“真正可执行”。
     # TODO: 为 mcp_tools 增加函数分发器，把 tc.function.name 路由到实际 MCP 调用
     tools = BASE_TOOLS + mcp_tools
     system = "You are a concise coding assistant."
@@ -92,6 +103,7 @@ def run(task: str) -> str:
         system += f"\n\n[Skills]\n{skills_text}"
 
     messages = [{"role": "system", "content": system}, {"role": "user", "content": task}]
+    # 仍然是经典闭环：模型决定 -> 程序执行 -> 工具结果回填。
     for _ in range(8):
         resp = client.chat.completions.create(model=MODEL, messages=messages, tools=tools)
         msg = resp.choices[0].message

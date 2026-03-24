@@ -4,6 +4,10 @@
 核心思路：
 - 把“委派”也做成一个工具（subagent）。
 - subagent 启动独立消息上下文，干完返回结果给主 agent。
+
+说明：
+- 主 agent 负责编排，subagent 负责子任务执行
+- 独立上下文可降低不同任务之间的上下文干扰
 """
 
 import json
@@ -14,6 +18,7 @@ import sys
 from openai import OpenAI
 
 
+# 基础模型客户端初始化。
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), base_url=os.environ.get("OPENAI_BASE_URL"))
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
@@ -24,11 +29,12 @@ def bash(command: str) -> str:
 
 
 def subagent(role: str, task: str) -> str:
-    # 关键：subagent 使用独立 messages，不污染主 agent 的中间推理
+    # subagent 使用独立 messages，避免污染主 agent 的中间上下文。
     sub_messages = [
         {"role": "system", "content": f"You are a {role}. Be concise and finish the assigned task only."},
         {"role": "user", "content": task},
     ]
+    # 避免 subagent 再次调用 subagent（递归委派会让流程复杂度激增）。
     sub_tools = [t for t in TOOLS if t["function"]["name"] != "subagent"]
     for _ in range(6):
         r = client.chat.completions.create(model=MODEL, messages=sub_messages, tools=sub_tools)
@@ -40,6 +46,7 @@ def subagent(role: str, task: str) -> str:
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
             fn = FUNCTIONS.get(name)
+            # 容错：遇到未知子工具时返回错误文本，而不是抛异常中断主流程。
             out = fn(**args) if fn else f"Unknown sub tool: {name}"
             sub_messages.append({"role": "tool", "tool_call_id": tc.id, "content": out})
     return "subagent max iterations reached"
@@ -53,6 +60,7 @@ FUNCTIONS = {"bash": bash, "subagent": subagent}
 
 
 def run(task: str) -> str:
+    # 主 agent 的角色是“编排器”：决定何时自己做、何时委派给 subagent。
     messages = [
         {"role": "system", "content": "You are an orchestrator. Use subagent when specialization helps."},
         {"role": "user", "content": task},
